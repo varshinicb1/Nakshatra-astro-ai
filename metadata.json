@@ -1,0 +1,8 @@
+{
+  "name": "Nakshatra Astro-AI",
+  "description": "Advanced AI-powered astrophotography, constellation identification, and celestial research tool.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}

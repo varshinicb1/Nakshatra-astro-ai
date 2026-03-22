@@ -1,0 +1,26 @@
+{
+  "name": "Nakshatra Astro-AI",
+  "short_name": "Nakshatra",
+  "description": "Advanced AI-powered astrophotography, constellation identification, and celestial research tool.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#05070a",
+  "background_color": "#05070a",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["education", "utilities", "photography"],
+  "lang": "en"
+}
