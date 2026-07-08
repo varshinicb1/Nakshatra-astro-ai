@@ -40,13 +40,25 @@ class KalmanFilter {
   }
 }
 
+export interface AccelReading {
+  x: number;
+  y: number;
+  z: number;
+  timestamp: number;
+}
+
 export function useSensors() {
   const [orientation, setOrientation] = useState<Orientation>({ alpha: 0, beta: 0, gamma: 0 });
   const [location, setLocation] = useState<Location | null>(null);
   const [isFlat, setIsFlat] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
-  
+
+  // Latest raw accelerometer reading, updated on every 'devicemotion' event.
+  // Exposed via a ref (not state) so high-frequency updates don't trigger re-renders;
+  // consumers read accelRef.current directly during a capture loop.
+  const accelRef = useRef<AccelReading>({ x: 0, y: 0, z: 1, timestamp: Date.now() });
+
   const watchIdRef = useRef<number | null>(null);
   const lastUpdateRef = useRef<number>(0);
   
@@ -67,6 +79,14 @@ export function useSensors() {
       }
     } else {
       setPermissionGranted(true);
+    }
+    // iOS 13+ also gates devicemotion behind its own permission prompt.
+    if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
+      try {
+        await (DeviceMotionEvent as any).requestPermission();
+      } catch (err) {
+        // ignore — accelerometer simply won't fire if denied
+      }
     }
   }, []);
 
@@ -97,6 +117,20 @@ export function useSensors() {
 
     window.addEventListener('deviceorientation', handleOrientation);
 
+    const handleMotion = (e: DeviceMotionEvent) => {
+      // Prefer gravity-inclusive acceleration (what a real IMU reports at rest: ~1g on the
+      // stationary axis); fall back to accelerationIncludingGravity if `acceleration` is null.
+      const acc = e.accelerationIncludingGravity || e.acceleration;
+      if (!acc || acc.x === null || acc.y === null || acc.z === null) return;
+      accelRef.current = {
+        x: acc.x / 9.81, // normalize m/s^2 -> g so downstream variance math matches the {x,y,z:1} baseline
+        y: acc.y / 9.81,
+        z: acc.z / 9.81,
+        timestamp: Date.now(),
+      };
+    };
+    window.addEventListener('devicemotion', handleMotion);
+
     try {
       watchIdRef.current = navigator.geolocation.watchPosition(
         (pos) => {
@@ -118,6 +152,7 @@ export function useSensors() {
 
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
+      window.removeEventListener('devicemotion', handleMotion);
       if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
     };
   }, [permissionGranted]);
@@ -129,5 +164,6 @@ export function useSensors() {
     requestPermission,
     permissionGranted,
     locationError,
+    accelRef,
   };
 }

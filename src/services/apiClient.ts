@@ -2,7 +2,12 @@
 // On Android, 'localhost' refers to the device itself.
 // Use VITE_API_URL in .env to point to your development machine's IP (e.g., http://192.168.1.5:3001)
 const API_BASE = import.meta.env.VITE_API_URL || (window.location.hostname === 'localhost' ? 'http://localhost:3001' : '/api');
-const APP_TOKEN = import.meta.env.VITE_APP_TOKEN || 'nakshatra-secure-token-2026';
+// No hardcoded fallback: VITE_APP_TOKEN must be set at build time (see .env.example) so this
+// value can't silently degrade to a publicly-known default shared secret.
+const APP_TOKEN = import.meta.env.VITE_APP_TOKEN || '';
+if (!APP_TOKEN) {
+  console.error('VITE_APP_TOKEN is not set. API requests to the backend will be rejected.');
+}
 
 interface RequestOptions {
   method?: 'GET' | 'POST';
@@ -83,6 +88,17 @@ class ApiClient {
 
   async getAPOD(): Promise<any> {
     return this.request('/api/apod');
+  }
+
+  async createPaymentOrder(): Promise<{ orderId: string; amount: number; currency: string; keyId: string }> {
+    return this.request('/api/payment/create-order', { method: 'POST' });
+  }
+
+  async verifyPayment(razorpay_order_id: string, razorpay_payment_id: string, razorpay_signature: string): Promise<{ verified: boolean }> {
+    return this.request('/api/payment/verify', {
+      method: 'POST',
+      body: { razorpay_order_id, razorpay_payment_id, razorpay_signature },
+    });
   }
 }
 
