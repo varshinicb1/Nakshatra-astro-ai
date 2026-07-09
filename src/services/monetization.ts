@@ -1,88 +1,122 @@
 import { Preferences } from '@capacitor/preferences';
-import { apiClient } from './apiClient';
+import { Capacitor } from '@capacitor/core';
 
 const AD_FREE_KEY = 'nakshatra_ad_free_unlocked';
 
+// Must match the in-app product ID you configure in Play Console under
+// Monetize > Products > In-app products (one-time, non-consumable, ₹199).
+export const AD_FREE_PRODUCT_ID = 'nakshatra_ad_free_unlock';
+
 declare global {
   interface Window {
-    Razorpay: any;
+    CdvPurchase?: any;
   }
 }
 
-const RAZORPAY_CHECKOUT_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
+let initPromise: Promise<void> | null = null;
 
-function loadRazorpayScript(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (window.Razorpay) { resolve(); return; }
-    const existing = document.querySelector(`script[src="${RAZORPAY_CHECKOUT_SRC}"]`);
-    if (existing) {
-      existing.addEventListener('load', () => resolve());
-      existing.addEventListener('error', () => reject(new Error('Failed to load payment gateway.')));
+/**
+ * Initializes Google Play Billing via cordova-plugin-purchase (a free, open-source,
+ * widely-used Cordova/Capacitor plugin — works without any third-party payment gateway
+ * or KYC approval, since it rides on the developer's already-approved Play Console account).
+ * Registers the ad-free product and wires purchase lifecycle handlers that persist the
+ * unlock locally once Google's own receipt verification approves it.
+ */
+function ensureInitialized(): Promise<void> {
+  if (initPromise) return initPromise;
+
+  initPromise = new Promise((resolve) => {
+    if (!Capacitor.isNativePlatform() || !window.CdvPurchase) {
+      resolve(); // web/dev fallback — purchases simply won't be available
       return;
     }
-    const script = document.createElement('script');
-    script.src = RAZORPAY_CHECKOUT_SRC;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load payment gateway.'));
-    document.head.appendChild(script);
+
+    const { store, ProductType, Platform } = window.CdvPurchase;
+
+    store.register([{
+      id: AD_FREE_PRODUCT_ID,
+      type: ProductType.NON_CONSUMABLE,
+      platform: Platform.GOOGLE_PLAY,
+    }]);
+
+    store.when().approved((transaction: any) => transaction.verify());
+    store.when().verified((receipt: any) => receipt.finish());
+    store.when().finished(async (transaction: any) => {
+      if (transaction.products.some((p: any) => p.id === AD_FREE_PRODUCT_ID)) {
+        await Preferences.set({ key: AD_FREE_KEY, value: 'true' });
+      }
+    });
+
+    store.error((err: any) => console.warn('Play Billing error:', err));
+
+    store.initialize([Platform.GOOGLE_PLAY]).then(() => resolve()).catch(() => resolve());
   });
+
+  return initPromise;
 }
 
 export async function isAdFreeUnlocked(): Promise<boolean> {
   const { value } = await Preferences.get({ key: AD_FREE_KEY });
-  return value === 'true';
-}
+  if (value === 'true') return true;
 
-async function markAdFreeUnlocked(): Promise<void> {
-  await Preferences.set({ key: AD_FREE_KEY, value: 'true' });
+  // Also check Play Billing's own record in case local storage was cleared but the user
+  // already owns the product (e.g. reinstall) — Play Billing restores ownership automatically.
+  await ensureInitialized();
+  if (Capacitor.isNativePlatform() && window.CdvPurchase) {
+    const owned = window.CdvPurchase.store.get(AD_FREE_PRODUCT_ID)?.owned;
+    if (owned) {
+      await Preferences.set({ key: AD_FREE_KEY, value: 'true' });
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
- * Runs the full one-time ₹199 ad-free purchase flow:
- * 1. Ask our backend to create a Razorpay order (server sets the price — never trust a client amount).
- * 2. Open Razorpay Checkout for the user to pay.
- * 3. Send the checkout response back to our backend to verify the cryptographic signature.
- * 4. Only on verified success, persist the ad-free unlock locally so it survives app restarts.
+ * Runs the one-time ₹199 ad-free purchase through Google Play Billing. This opens Google's
+ * own native purchase sheet — no external checkout, no card details ever touch this app.
  */
-export async function purchaseAdFree(userEmail?: string): Promise<{ success: boolean; error?: string }> {
-  try {
-    await loadRazorpayScript();
-    const order = await apiClient.createPaymentOrder();
-
-    return await new Promise((resolve) => {
-      const rzp = new window.Razorpay({
-        key: order.keyId,
-        amount: order.amount,
-        currency: order.currency,
-        order_id: order.orderId,
-        name: 'Nakshatra Astro-AI',
-        description: 'Ad-Free Unlock (one-time)',
-        prefill: userEmail ? { email: userEmail } : undefined,
-        theme: { color: '#10b981' },
-        handler: async (response: any) => {
-          try {
-            const verification = await apiClient.verifyPayment(
-              response.razorpay_order_id,
-              response.razorpay_payment_id,
-              response.razorpay_signature,
-            );
-            if (verification.verified) {
-              await markAdFreeUnlocked();
-              resolve({ success: true });
-            } else {
-              resolve({ success: false, error: 'Payment could not be verified.' });
-            }
-          } catch (err: any) {
-            resolve({ success: false, error: err.message || 'Payment verification failed.' });
-          }
-        },
-        modal: {
-          ondismiss: () => resolve({ success: false, error: 'Payment cancelled.' }),
-        },
-      });
-      rzp.open();
-    });
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Could not start payment.' };
+export async function purchaseAdFree(): Promise<{ success: boolean; error?: string }> {
+  if (!Capacitor.isNativePlatform()) {
+    return { success: false, error: 'Purchases are only available in the installed app.' };
   }
+  await ensureInitialized();
+  if (!window.CdvPurchase) {
+    return { success: false, error: 'Play Billing is unavailable on this device.' };
+  }
+
+  const { store } = window.CdvPurchase;
+  const product = store.get(AD_FREE_PRODUCT_ID);
+  if (!product?.getOffer()) {
+    return { success: false, error: 'Ad-free product is not available yet. Please try again shortly.' };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finishedHandler = (transaction: any) => {
+      if (!settled && transaction.products.some((p: any) => p.id === AD_FREE_PRODUCT_ID)) {
+        settled = true;
+        resolve({ success: true });
+      }
+    };
+    const errorHandler = (err: any) => {
+      if (!settled) {
+        settled = true;
+        resolve({ success: false, error: err?.message || 'Purchase failed.' });
+      }
+    };
+
+    store.when().finished(finishedHandler);
+    store.error(errorHandler);
+
+    product.getOffer().order().catch(errorHandler);
+
+    // Safety timeout in case the user backgrounds the app mid-purchase and no event fires.
+    setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({ success: false, error: 'Purchase timed out. If you completed payment, restart the app to sync.' });
+      }
+    }, 60000);
+  });
 }

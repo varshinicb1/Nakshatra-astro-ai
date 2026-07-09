@@ -89,17 +89,6 @@ class ApiClient {
   async getAPOD(): Promise<any> {
     return this.request('/api/apod');
   }
-
-  async createPaymentOrder(): Promise<{ orderId: string; amount: number; currency: string; keyId: string }> {
-    return this.request('/api/payment/create-order', { method: 'POST' });
-  }
-
-  async verifyPayment(razorpay_order_id: string, razorpay_payment_id: string, razorpay_signature: string): Promise<{ verified: boolean }> {
-    return this.request('/api/payment/verify', {
-      method: 'POST',
-      body: { razorpay_order_id, razorpay_payment_id, razorpay_signature },
-    });
-  }
 }
 
 export const apiClient = new ApiClient(API_BASE, APP_TOKEN);

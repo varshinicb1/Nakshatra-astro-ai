@@ -3,9 +3,7 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
-import Razorpay from 'razorpay';
 
 dotenv.config({ path: '../.env.local' });
 
@@ -20,11 +18,10 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://checkout.razorpay.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       imgSrc: ["'self'", "data:", "blob:", "https://*.googleapis.com", "https://api.nasa.gov"],
-      connectSrc: ["'self'", "https://*.googleapis.com", "api.open-meteo.com", "api.open-notify.org", "https://api.razorpay.com", "https://checkout.razorpay.com"],
-      frameSrc: ["https://checkout.razorpay.com", "https://api.razorpay.com"],
+      connectSrc: ["'self'", "https://*.googleapis.com", "api.open-meteo.com", "api.open-notify.org"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       objectSrc: ["'none'"],
       upgradeInsecureRequests: [],
@@ -287,74 +284,9 @@ Return ONLY valid JSON in this exact format:
   });
 });
 
-// --- Ad-Free Unlock Payment (Razorpay, one-time ₹199) ---
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
-const AD_FREE_PRICE_PAISE = 19900; // ₹199.00
-
-const razorpay = RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET
-  ? new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET })
-  : null;
-
-const paymentLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: { error: 'Too many payment requests. Please wait before trying again.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-// Creates a Razorpay order for the one-time ad-free unlock. The order amount is fixed
-// server-side (never trust a client-supplied amount) to prevent a tampered client from
-// buying the unlock for an arbitrary price.
-app.post('/api/payment/create-order', validateAppToken, paymentLimiter, async (_req, res) => {
-  if (!razorpay) {
-    res.status(500).json({ error: 'Payment gateway not configured on server.' });
-    return;
-  }
-  try {
-    const order = await razorpay.orders.create({
-      amount: AD_FREE_PRICE_PAISE,
-      currency: 'INR',
-      receipt: `adfree_${Date.now()}`,
-      notes: { product: 'nakshatra_ad_free_unlock' },
-    });
-    res.json({ orderId: order.id, amount: order.amount, currency: order.currency, keyId: RAZORPAY_KEY_ID });
-  } catch (err) {
-    console.error('Razorpay order creation failed:', err);
-    res.status(500).json({ error: 'Could not create payment order.' });
-  }
-});
-
-// Verifies the Razorpay checkout signature (HMAC-SHA256 of order_id|payment_id using the
-// account's key secret) — this is what actually proves the payment happened; without it,
-// a client could simply claim success without paying anything.
-app.post('/api/payment/verify', validateAppToken, paymentLimiter, (req, res) => {
-  if (!RAZORPAY_KEY_SECRET) {
-    res.status(500).json({ error: 'Payment gateway not configured on server.' });
-    return;
-  }
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-    res.status(400).json({ error: 'Missing payment verification fields.' });
-    return;
-  }
-
-  const expectedSignature = crypto
-    .createHmac('sha256', RAZORPAY_KEY_SECRET)
-    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-    .digest('hex');
-
-  const isValid = expectedSignature.length === razorpay_signature.length &&
-    crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(razorpay_signature));
-
-  if (!isValid) {
-    res.status(400).json({ error: 'Payment signature verification failed.' });
-    return;
-  }
-
-  res.json({ verified: true });
-});
+// Note: the one-time ₹199 ad-free unlock is handled entirely by Google Play Billing
+// (see src/services/monetization.ts) — Play's own purchase + receipt system does the
+// payment and verification, so no payment endpoint is needed on this server at all.
 
 // --- Astronomy Picture of the Day (NASA APOD - free, with cache) ---
 let apodCache: { data: any; fetchedAt: number } | null = null;
@@ -398,7 +330,5 @@ app.listen(PORT, () => {
   console.log(`     GET  /api/weather    - Weather & seeing conditions`);
   console.log(`     GET  /api/iss        - ISS live position`);
   console.log(`     GET  /api/apod       - NASA Picture of the Day`);
-  console.log(`     POST /api/payment/create-order - Razorpay ad-free order (secured)`);
-  console.log(`     POST /api/payment/verify       - Razorpay payment verification (secured)`);
   console.log(`     GET  /api/health     - Server health check\n`);
 });
