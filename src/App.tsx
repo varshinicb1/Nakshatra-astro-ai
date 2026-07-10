@@ -722,7 +722,7 @@ export default function App() {
 
     // Offline geometric plate-solve: real star extraction + triangle-ratio constellation
     // matching + RA/Dec-projected DSO proximity check (no network, no AI hallucination risk).
-    // Used to ground the Gemini analysis prompt with verified detections.
+    // Used to ground the AI analysis prompt with verified detections.
     let offlineContext: string[] = [];
     if (location) {
       try {
@@ -807,7 +807,7 @@ export default function App() {
           <div className="space-y-3 text-left mb-8">
             {[
               { icon: <Camera className="w-4 h-4" />, text: 'HDR stacking with sigma-clip, median & star trails' },
-              { icon: <Sparkles className="w-4 h-4" />, text: 'Gemini AI identifies stars, nebulae & galaxies' },
+              { icon: <Sparkles className="w-4 h-4" />, text: 'AI identifies stars, nebulae & galaxies' },
               { icon: <Telescope className="w-4 h-4" />, text: 'Stellarium meteor shower & observability engine' },
               { icon: <Eye className="w-4 h-4" />, text: 'Real-time Bortle scale, moon phase & sky quality' },
             ].map((item, i) => (
@@ -821,7 +821,7 @@ export default function App() {
             <Zap className="w-5 h-5" /> INITIALIZE SENSORS
           </motion.button>
           <p className="mt-4 text-[8px] text-gray-500 leading-relaxed">Free with ads. Remove ads anytime with a one-time ₹199 purchase in Settings.</p>
-          <p className="mt-3 text-[7px] text-gray-600 uppercase tracking-[0.3em]">v14.0 • Stellarium Remix • Gemini AI</p>
+          <p className="mt-3 text-[7px] text-gray-600 uppercase tracking-[0.3em]">v14.0 • Stellarium Remix • AI-Powered</p>
           <a href="/privacy.html" target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-[8px] text-emerald-500/70 underline">Privacy Policy</a>
         </motion.div>
       </div>

@@ -7,25 +7,25 @@ Items are grouped by what kind of work they are. Nothing here is optional unless
 
 ## 1. Security — do these first, before anything else
 
-- [ ] **Rotate the release keystore.** The old `nakshatra-release.keystore` password was
-  committed to this repo in plaintext (fixed in code, but the key itself must be treated as
-  compromised if this repo was ever pushed to a remote you don't fully control). Generate a new one:
-  ```
-  keytool -genkey -v -keystore nakshatra-release.keystore -alias nakshatra -keyalg RSA -keysize 2048 -validity 10000
-  ```
-  Store the new password in `android/keystore.properties` (gitignored — copy from
-  `android/keystore.properties.example`). **Back this keystore up somewhere safe outside git** —
-  if you lose it, you can never update the app again under the same package name.
+- [x] **Rotate the release keystore.** Done — `android/play-release.keystore` is the new signing
+  key, wired via `android/keystore.properties` (gitignored). **Back this keystore up somewhere
+  safe outside git** — if you lose it, you can never update the app again under the same package
+  name. The old `nakshatra-release.keystore` is no longer used for signing; its committed
+  password should still be considered burned.
 
 - [ ] **Generate a real `APP_SECRET_TOKEN`.**
   ```
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   ```
   Set it as `APP_SECRET_TOKEN` on the server and `VITE_APP_TOKEN` on the client build — they
-  must match. Do not reuse the placeholder value from `.env.example`.
+  must match. `.env.local` currently still has the placeholder value — generate and set a real
+  one before the final production build.
 
-- [ ] **Get a real `GEMINI_API_KEY`** from [Google AI Studio](https://aistudio.google.com/apikey),
-  set it server-side only.
+- [x] **Get a real AI API key.** Switched from Gemini to **NVIDIA NIM** (free-tier vision model,
+  `meta/llama-3.2-11b-vision-instruct`) since it needs no billing/credit card and the key already
+  works end-to-end (tested locally). Get your own free key at
+  [build.nvidia.com](https://build.nvidia.com/) → sign in → open any model → "Get API Key".
+  Set as `NVIDIA_NIM_API_KEY` server-side only.
 
 - [ ] **Create the ad-free in-app product in Play Console.** The ₹199 unlock is handled
   entirely by Google Play Billing now (no Razorpay, no third-party gateway, no separate KYC —
@@ -39,27 +39,22 @@ Items are grouped by what kind of work they are. Nothing here is optional unless
   track or later (a locally sideloaded debug APK won't be able to complete a real purchase) —
   see §4 for how to test this.
 
-- [ ] **Get a real AdMob account + ad unit IDs** from [admob.google.com](https://apps.admob.com/).
-  You need: one App ID, one Banner ad unit, one Interstitial ad unit. Replace:
-  - `VITE_ADMOB_BANNER_ID`, `VITE_ADMOB_INTERSTITIAL_ID` (client env)
-  - `com.google.android.gms.ads.APPLICATION_ID` meta-data value in
-    `android/app/src/main/AndroidManifest.xml` (currently Google's public sample App ID)
-
-  Shipping the test IDs to production means the app earns **zero ad revenue** and Google may
-  flag real user traffic hitting test ad units.
+- [x] **Get a real AdMob account + ad unit IDs.** Done — real App ID, Banner, and Interstitial
+  unit IDs are wired into `AndroidManifest.xml` and `.env.local`. New ad units can take up to an
+  hour to start actually serving ads after creation.
 
 ---
 
 ## 2. Infrastructure — things that need to be deployed/hosted
 
-- [ ] **Deploy `server/`** somewhere with a public HTTPS URL. This backend only handles Gemini
-  AI analysis and weather/ISS/APOD proxying now (payments moved to Google Play Billing, no
+- [ ] **Deploy `server/`** somewhere with a public HTTPS URL. This backend only handles NVIDIA
+  NIM AI analysis and weather/ISS/APOD proxying now (payments moved to Google Play Billing, no
   server involvement needed there) — but the app still needs it for the AI identification
   feature to work. A ready-to-use `render.yaml` blueprint is included in this repo:
   1. Push this repo to GitHub if it isn't already.
   2. On [render.com](https://render.com): **New > Blueprint**, connect this repo — Render reads
      `render.yaml` automatically and provisions the service.
-  3. In the new service's **Environment** tab, fill in `GEMINI_API_KEY` and `APP_SECRET_TOKEN`
+  3. In the new service's **Environment** tab, fill in `NVIDIA_NIM_API_KEY` and `APP_SECRET_TOKEN`
      (marked `sync: false` in the blueprint so they're never committed to git).
   4. Copy the resulting `https://<name>.onrender.com` URL for the next step.
 
@@ -148,7 +143,7 @@ hardware**. Do this before submitting — emulators won't reliably reproduce sen
   actually does now:
   - Camera (photos) — used for core functionality, not shared
   - Location (precise) — used for core functionality (sky calculations) + sent with AI analysis
-    requests, not shared with third parties beyond Google's Gemini API for that specific request
+    requests, not shared with third parties beyond NVIDIA's NIM API for that specific request
   - Device/advertising ID — collected by AdMob for ads
   - Payment info — handled entirely by Google Play Billing, app never sees card details
 - [ ] **Content rating questionnaire** — this is a general-audience astrophotography tool, should
@@ -180,12 +175,15 @@ These don't need re-verification, just listed for context:
   real implementations
 - Real accelerometer wired in
 - Crash-safety: try/catch around capture loop and stacking, frame buffer memory capped
-- Keystore password removed from `build.gradle` source (still needs the actual key rotated, §1)
+- Keystore rotated — `android/play-release.keystore` is the new signing key (§1, done)
 - Unused dangerous permissions (`RECORD_AUDIO`, legacy storage) removed from the manifest
-- Hardcoded shared-secret fallback removed from `APP_SECRET_TOKEN`
-- AdMob integration built and wired (needs real keys, §1)
+- Hardcoded shared-secret fallback removed from `APP_SECRET_TOKEN` (still needs a real generated
+  value set before the final build, §1)
+- AdMob integration built and wired with real App ID + Banner + Interstitial unit IDs (§1, done)
 - Payment moved to Google Play Billing (`cordova-plugin-purchase`) — no third-party gateway,
-  no separate KYC, no payment code left on the server at all (needs the in-app product created
-  in Play Console, §1)
+  no separate KYC, no payment code left on the server at all (still needs the in-app product
+  created in Play Console, §1)
+- AI analysis switched from Gemini to **NVIDIA NIM** (free-tier vision model) — tested working
+  end-to-end locally with a real key (§1, done)
 - `public/privacy.html` drafted (needs public hosting, §2)
 - `render.yaml` blueprint added for one-click free backend hosting on Render (§2)

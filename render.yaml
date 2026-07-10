@@ -26,7 +26,7 @@ services:
         value: 20.11.0
       - key: PORT
         value: 3001
-      - key: GEMINI_API_KEY
+      - key: NVIDIA_NIM_API_KEY
         sync: false
       - key: APP_SECRET_TOKEN
         sync: false

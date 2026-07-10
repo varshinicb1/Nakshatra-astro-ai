@@ -34,16 +34,10 @@
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
 
-        <!--
-          AdMob App ID — REQUIRED or any AdMob call crashes at runtime.
-          The value below is Google's official sample App ID for testing only.
-          Replace with your real AdMob App ID (from admob.google.com) before release,
-          via the ADMOB_APP_ID placeholder wired through variables.gradle/manifestPlaceholders,
-          or by editing this value directly.
-        -->
+        <!-- Real AdMob App ID for Nakshatra Astro-AI (admob.google.com) -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
+            android:value="ca-app-pub-4228337368763419~7852575447" />
     </application>
 
     <!-- Permissions -->
