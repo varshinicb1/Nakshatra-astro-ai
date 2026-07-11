@@ -13,7 +13,11 @@
     "server:dev": "tsx watch server/index.ts",
     "android:sync": "npx cap sync android",
     "android:open": "npx cap open android",
-    "android:run": "npx cap run android"
+    "android:run": "npx cap run android",
+    "android:aab": "npm run build && npx cap sync android && cd android && gradlew.bat bundleRelease",
+    "play:upload": "node scripts/play-upload.mjs",
+    "play:internal": "node scripts/play-upload.mjs internal",
+    "play:production": "node scripts/play-upload.mjs production"
   },
   "dependencies": {
     "@capacitor-community/admob": "^8.0.0",
@@ -50,6 +54,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.4.21",
+    "googleapis": "^173.0.0",
     "rimraf": "^6.0.0",
     "tailwindcss": "^4.1.14",
     "terser": "^5.46.1",
