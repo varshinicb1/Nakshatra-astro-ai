@@ -3,9 +3,10 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
 
-dotenv.config({ path: '../.env.local' });
+// Resolves relative to the repo root (where `npm run server` is invoked from), not this file's
+// directory — .env.local lives at the repo root alongside package.json.
+dotenv.config({ path: '.env.local' });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -56,11 +57,12 @@ const aiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// App token validation (prevents random API abuse)
-const DEFAULT_TOKEN = 'nakshatra-secure-token-2026';
-const APP_TOKEN = process.env.APP_SECRET_TOKEN || DEFAULT_TOKEN;
-if (APP_TOKEN === DEFAULT_TOKEN) {
-  console.warn('⚠️  WARNING: Using default app token. Set APP_SECRET_TOKEN in .env.local for production!');
+// App token validation (prevents random API abuse). No hardcoded fallback — a shared default
+// baked into the repo would be a public secret, not a secret at all.
+const APP_TOKEN = process.env.APP_SECRET_TOKEN;
+if (!APP_TOKEN) {
+  console.error('❌ APP_SECRET_TOKEN is not set. Refusing to start with an insecure default. See .env.example.');
+  process.exit(1);
 }
 
 function validateAppToken(req: express.Request, res: express.Response, next: express.NextFunction): void {
@@ -134,10 +136,27 @@ app.get('/api/iss', async (_req, res) => {
   }
 });
 
-// --- Gemini AI Analysis (secured behind app token + rate limit) ---
+// --- AI Analysis via NVIDIA NIM (free-tier vision model, secured behind app token + rate limit) ---
+const NIM_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const NIM_MODEL = 'meta/llama-3.2-11b-vision-instruct';
+
+function extractJson(text: string): any {
+  // The model doesn't reliably honor a strict JSON-only response format, so pull out the
+  // first {...} block (stripping markdown code fences if present) rather than assuming the
+  // whole response body is clean JSON.
+  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fencedMatch ? fencedMatch[1] : text;
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('No JSON object found in AI response');
+  }
+  return JSON.parse(candidate.slice(start, end + 1));
+}
+
 app.post('/api/analyze', validateAppToken, aiLimiter, async (req, res) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+  const apiKey = process.env.NVIDIA_NIM_API_KEY;
+  if (!apiKey) {
     res.status(500).json({ error: 'API key not configured on server.' });
     return;
   }
@@ -153,8 +172,6 @@ app.post('/api/analyze', validateAppToken, aiLimiter, async (req, res) => {
     res.status(400).json({ error: 'Invalid location data' });
     return;
   }
-
-  const ai = new GoogleGenAI({ apiKey });
 
   const prompt = `You are an expert astrophysicist and celestial observer with PhD-level knowledge.
 Analyze this night sky photograph with extreme precision.
@@ -175,7 +192,9 @@ Perform the following analysis:
 9. Note any upcoming celestial events visible from this location in the next 7 days.
 10. Provide a detailed scientific narrative about the most prominent objects visible.
 
-Return ONLY valid JSON in this exact format:
+Respond with ONLY the raw JSON object below — no markdown code fences, no explanation before or
+after, no backticks. The very first character of your response must be "{" and the last must be "}".
+Use this exact format:
 {
   "constellations": ["Name1", "Name2"],
   "objects": [
@@ -221,32 +240,40 @@ Return ONLY valid JSON in this exact format:
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const imageData = image.includes(',') ? image.split(',')[1] : image;
+      const imageDataUrl = image.startsWith('data:') ? image : `data:image/jpeg;base64,${image}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-preview-05-20',
-        contents: [
-          {
-            parts: [
-              { text: prompt },
-              {
-                inlineData: {
-                  mimeType: 'image/jpeg',
-                  data: imageData,
-                },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseMimeType: 'application/json',
+      const nimResponse = await fetch(NIM_API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          model: NIM_MODEL,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: imageDataUrl } },
+              ],
+            },
+          ],
+          max_tokens: 2048,
+          temperature: 0.4,
+        }),
       });
 
-      const text = response.text;
+      if (!nimResponse.ok) {
+        const errBody = await nimResponse.text().catch(() => '');
+        throw new Error(`NIM API returned ${nimResponse.status}: ${errBody.slice(0, 300)}`);
+      }
+
+      const nimData: any = await nimResponse.json();
+      const text = nimData?.choices?.[0]?.message?.content;
       if (!text) throw new Error('Empty response from AI');
 
-      const parsed = JSON.parse(text);
+      const parsed = extractJson(text);
 
       // Validate response structure
       if (!parsed.constellations || !Array.isArray(parsed.constellations)) {
@@ -283,6 +310,10 @@ Return ONLY valid JSON in this exact format:
   });
 });
 
+// Note: the one-time ₹199 ad-free unlock is handled entirely by Google Play Billing
+// (see src/services/monetization.ts) — Play's own purchase + receipt system does the
+// payment and verification, so no payment endpoint is needed on this server at all.
+
 // --- Astronomy Picture of the Day (NASA APOD - free, with cache) ---
 let apodCache: { data: any; fetchedAt: number } | null = null;
 const APOD_CACHE_TTL = 60 * 60 * 1000; // 1 hour
@@ -317,13 +348,20 @@ app.get('/api/apod', async (_req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`\n🔭 Nakshatra Astro-AI Server v3.0.0`);
-  console.log(`   Running on http://localhost:${PORT}`);
-  console.log(`   Endpoints:`);
-  console.log(`     POST /api/analyze    - AI celestial analysis (secured)`);
-  console.log(`     GET  /api/weather    - Weather & seeing conditions`);
-  console.log(`     GET  /api/iss        - ISS live position`);
-  console.log(`     GET  /api/apod       - NASA Picture of the Day`);
-  console.log(`     GET  /api/health     - Server health check\n`);
-});
+// On Vercel, this module is imported by api/index.ts as a serverless request handler —
+// there's no long-running process to bind a port to, so app.listen() only runs when this
+// file is executed directly (e.g. `npm run server` locally or on Render).
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`\n🔭 Nakshatra Astro-AI Server v3.0.0`);
+    console.log(`   Running on http://localhost:${PORT}`);
+    console.log(`   Endpoints:`);
+    console.log(`     POST /api/analyze    - AI celestial analysis (secured)`);
+    console.log(`     GET  /api/weather    - Weather & seeing conditions`);
+    console.log(`     GET  /api/iss        - ISS live position`);
+    console.log(`     GET  /api/apod       - NASA Picture of the Day`);
+    console.log(`     GET  /api/health     - Server health check\n`);
+  });
+}
+
+export default app;

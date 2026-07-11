@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Signing secrets (never commit)
+android/keystore.properties
+*.keystore
+
+# Play Developer API service-account key (never commit)
+play-service-account.json
+*-service-account.json

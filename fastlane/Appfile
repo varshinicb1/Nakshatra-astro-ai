@@ -1,0 +1,2 @@
+json_key_file("fastlane/play-developer-api.json") # Google Play service-account JSON (you create this)
+package_name("com.nakshatra.astroai")

@@ -1,5 +1,6 @@
 import { ConstellationCatalog } from '../data/constellations';
 import { DeepSpaceCatalog } from '../data/deepSpace';
+import { CelestialEngine } from './celestialEngine';
 
 interface Point {
   x: number;
@@ -127,29 +128,70 @@ export class PlateSolver {
   }
 
   /**
-   * Identifies Deep Space Objects (Messier/NGC) by checking if dense star clusters
-   * overlap with known DSO catalog positions within the field of view.
+   * Parses a DSO catalog entry's sexagesimal RA/Dec strings ("00h 42m" / "+41° 16'")
+   * into decimal hours (RA) and decimal degrees (Dec).
    */
-  static findDSOs(stars: Star[]): string[] {
-    if (stars.length < 5) return [];
-    
+  private static parseDSOCoords(ra: string, dec: string): { raHours: number; decDeg: number } | null {
+    const raMatch = ra.match(/(\d+)h\s*(\d+)m/);
+    const decMatch = dec.match(/([+-]?\d+)°\s*(\d+)/);
+    if (!raMatch || !decMatch) return null;
+
+    const raHours = parseInt(raMatch[1], 10) + parseInt(raMatch[2], 10) / 60;
+    const decSign = decMatch[1].startsWith('-') ? -1 : 1;
+    const decDeg = decSign * (Math.abs(parseInt(decMatch[1], 10)) + parseInt(decMatch[2], 10) / 60);
+
+    return { raHours, decDeg };
+  }
+
+  /**
+   * Identifies Deep Space Objects (Messier/NGC) actually present in frame by projecting
+   * each catalog object's real RA/Dec to an expected screen position (same alt/az + FOV
+   * transform used for guided star alignment) and checking whether a detected star
+   * cluster centroid falls within a small pixel radius of that projected position.
+   * Unlike a naive star-count heuristic, this only reports objects whose predicted
+   * location actually lines up with something bright detected in the image.
+   */
+  static findDSOs(
+    stars: Star[],
+    opts: {
+      lat: number;
+      lng: number;
+      date: Date;
+      phoneAz: number;
+      phoneAlt: number;
+      fovX: number;
+      fovY: number;
+      width: number;
+      height: number;
+      matchRadiusPx?: number;
+    }
+  ): string[] {
+    if (stars.length === 0) return [];
+
+    const { lat, lng, date, phoneAz, phoneAlt, fovX, fovY, width, height } = opts;
+    const matchRadiusPx = opts.matchRadiusPx ?? Math.max(width, height) * 0.05;
     const found: string[] = [];
 
-    // Parse DSO RA/Dec into numeric degrees for proximity matching
     for (const dso of DeepSpaceCatalog) {
-      const raMatch = dso.ra.match(/(\d+)h\s*(\d+)m/);
-      const decMatch = dso.dec.match(/([+-]?\d+)°\s*(\d+)/);
-      if (!raMatch || !decMatch) continue;
+      const parsed = this.parseDSOCoords(dso.ra, dso.dec);
+      if (!parsed) continue;
 
-      const raDeg = (parseInt(raMatch[1]) + parseInt(raMatch[2]) / 60) * 15; // hours to degrees
-      const decDeg = parseInt(decMatch[1]) + parseInt(decMatch[2]) / 60 * (decMatch[1].startsWith('-') ? -1 : 1);
+      const { alt, az } = CelestialEngine.toHorizontal({ ra: parsed.raHours, dec: parsed.decDeg }, lat, lng, date);
 
-      // Check if any cluster of 3+ detected stars falls within a 5° radius of this DSO
-      // (We use relative pixel positions as a proxy — a real plate solution would project RA/Dec)
-      // For now, confirm the DSO only if magnitude is visible and we have enough stars
-      if (dso.mag <= 6.0 && stars.length >= 8) {
-        found.push(`${dso.id} (${dso.name})`);
-      } else if (dso.mag <= 4.5 && stars.length >= 5) {
+      let azDiff = az - phoneAz;
+      while (azDiff > 180) azDiff -= 360;
+      while (azDiff < -180) azDiff += 360;
+      const altDiff = alt - phoneAlt;
+
+      // Must actually be within the camera's field of view.
+      if (Math.abs(azDiff) >= fovX / 2 || Math.abs(altDiff) >= fovY / 2) continue;
+
+      const projX = (width / 2) + (azDiff / (fovX / 2)) * (width / 2);
+      const projY = (height / 2) - (altDiff / (fovY / 2)) * (height / 2);
+
+      // Confirm only if a detected star/cluster is actually near the projected position.
+      const hasNearbyDetection = stars.some(s => Math.hypot(s.x - projX, s.y - projY) < matchRadiusPx);
+      if (hasNearbyDetection) {
         found.push(`${dso.id} (${dso.name})`);
       }
     }

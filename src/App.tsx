@@ -19,18 +19,21 @@ import { ImpactStyle } from '@capacitor/haptics';
 import { ToastContainer, ToastData } from './components/Toast';
 import { NightModeOverlay } from './components/NightMode';
 import { Gallery } from './components/Gallery';
+import { SkyMap } from './components/SkyMap';
 import { ImageComparison } from './components/ImageComparison';
 import { MeteorShowerEngine, ObservabilityEngine, OcularsEngine } from './utils/stellariumPlugins';
 import { AstroPipeline, GyroSample, AccelSample } from './utils/astroPipeline';
 import { CelestialEngine, STAR_CATALOG } from './utils/celestialEngine';
+import { useMonetization } from './hooks/useMonetization';
 
 type StackingAlgorithm = 'sigma' | 'median' | 'average' | 'trail';
-type ViewMode = 'camera' | 'map' | 'gallery';
+type ViewMode = 'camera' | 'map' | 'sky' | 'gallery';
 
 export default function App() {
-  const { orientation, location, isFlat, requestPermission } = useSensors();
+  const { orientation, location, isFlat, requestPermission, accelRef } = useSensors();
   const { items: gallery, addItem: addToGallery, deleteItem: deleteFromGallery } = useDatabase();
   const { vibrate } = useCapacitor();
+  const { isAdFree, isPurchasing, purchase, maybeShowInterstitial } = useMonetization();
 
   // Core state
   const [isCapturing, setIsCapturing] = useState(false);
@@ -94,6 +97,7 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const orientationRef = useRef(orientation);
+  const previousFrameDataRef = useRef<Uint8ClampedArray | null>(null);
 
   useEffect(() => {
     orientationRef.current = orientation;
@@ -173,9 +177,40 @@ export default function App() {
     return () => streamRef.current?.getTracks().forEach(track => track.stop());
   }, [showIntro, startCamera]);
 
+  // Real Bortle estimate: periodically sample the live camera feed's background brightness
+  // (excluding bright star pixels) rather than guessing from GPS coordinates.
   useEffect(() => {
-    if (location) setSkyConditions(SkyForecaster.getSeeingConditions(location.lat, location.lng));
-  }, [location]);
+    if (showIntro || viewMode !== 'camera' || isCapturing) return;
+
+    const sampleSkyBrightness = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || video.videoWidth === 0) return;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+
+      const w = video.videoWidth, h = video.videoHeight;
+      canvas.width = w; canvas.height = h;
+      ctx.drawImage(video, 0, 0, w, h);
+      const { data } = ctx.getImageData(0, 0, w, h);
+
+      // Average brightness of non-star pixels only (stars would skew the "background" reading).
+      let sum = 0, count = 0;
+      const STAR_CUTOFF = 150;
+      for (let i = 0; i < data.length; i += 4 * 37) { // sparse sample for performance
+        const b = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (b < STAR_CUTOFF) { sum += b; count++; }
+      }
+      if (count === 0) return;
+      const meanBackground = sum / count;
+      const bortle = SkyForecaster.estimateBortleFromSkyBrightness(meanBackground, exposureTime, iso);
+      setSkyConditions(SkyForecaster.getSeeingConditions(bortle));
+    };
+
+    sampleSkyBrightness();
+    const interval = setInterval(sampleSkyBrightness, 8000);
+    return () => clearInterval(interval);
+  }, [showIntro, viewMode, isCapturing, exposureTime, iso]);
 
   // Audio Tour Logic
   const startAudioTour = useCallback((text: string) => {
@@ -352,6 +387,56 @@ export default function App() {
     return { x: bestX, y: bestY, val: maxVal };
   };
 
+  // Detects a real meteor streak: a spatially-coherent, elongated bright region (not a single hot
+  // pixel or a round point-like star) that is new relative to the previous frame and doesn't
+  // coincide with a known catalog star's predicted screen position.
+  const detectMeteorStreak = (
+    data: Uint8ClampedArray,
+    w: number,
+    h: number,
+    knownStars: { x: number; y: number }[],
+    prevData: Uint8ClampedArray | null,
+  ): boolean => {
+    const threshold = 220;
+    const step = 3; // subsample for perf
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, count = 0;
+
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        const i = (y * w + x) * 4;
+        const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (brightness <= threshold) continue;
+
+        // Skip pixels that were already bright in the previous frame (static stars/hot pixels).
+        if (prevData) {
+          const prevBrightness = (prevData[i] + prevData[i + 1] + prevData[i + 2]) / 3;
+          if (prevBrightness > threshold) continue;
+        }
+
+        // Skip pixels near a known catalog star's predicted position.
+        const nearKnownStar = knownStars.some(s => Math.hypot(s.x - x, s.y - y) < 25);
+        if (nearKnownStar) continue;
+
+        count++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    if (count < 5) return false; // too few new bright samples to be a real streak
+
+    const bboxW = maxX - minX + step;
+    const bboxH = maxY - minY + step;
+    const longSide = Math.max(bboxW, bboxH);
+    const shortSide = Math.max(step, Math.min(bboxW, bboxH));
+    const elongation = longSide / shortSide;
+
+    // A meteor trail is a line, not a blob: require clear elongation and a minimum length.
+    return elongation > 3 && longSide > 30;
+  };
+
   const captureAndStack = async () => {
     if (!videoRef.current || !canvasRef.current || !stackCanvasRef.current) return;
     
@@ -383,7 +468,12 @@ export default function App() {
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      showToast('Camera surface unavailable. Please retry.', 'error');
+      setIsCapturing(false);
+      return;
+    }
     const width = video.videoWidth || 1920;
     const height = video.videoHeight || 1080;
     canvas.width = width;
@@ -391,21 +481,46 @@ export default function App() {
     stackCanvasRef.current.width = width;
     stackCanvasRef.current.height = height;
 
-    const totalFrames = burstCount;
+    // Bound in-memory frame buffer so large bursts at high resolution can't OOM low-end devices.
+    // Each buffered frame is width*height*4 bytes (raw RGBA); cap the session to ~300MB of frames.
+    const MAX_BUFFER_BYTES = 300 * 1024 * 1024;
+    const bytesPerFrame = width * height * 4;
+    const maxSafeFrames = Math.max(1, Math.floor(MAX_BUFFER_BYTES / bytesPerFrame));
+    const totalFrames = Math.min(burstCount, maxSafeFrames);
+    if (totalFrames < burstCount) {
+      showToast(`Burst count clamped to ${totalFrames} frames to stay within safe memory limits at this resolution.`, 'info', 6000);
+    }
     const frameBuffer: Uint8ClampedArray[] = [];
 
     // Save initial frame for comparison
     ctx.drawImage(video, 0, 0, width, height);
     setSingleFrame(canvas.toDataURL('image/jpeg', 0.85));
+    previousFrameDataRef.current = null;
 
     let referencePoint: { x: number; y: number } | null = null;
     let lastTrackedPoint: { x: number; y: number } | null = null;
     let currentSearchRadius = 30;
 
     const captureLoop = async () => {
+      try {
+        await captureLoopStep();
+      } catch (err) {
+        console.error('Capture loop failed', err);
+        showToast('Capture session stopped unexpectedly. Your progress up to this point was discarded.', 'error');
+        setIsCapturing(false);
+        setIsProcessing(false);
+      }
+    };
+
+    const captureLoopStep = async () => {
       if (frameBuffer.length >= totalFrames) {
         setIsCapturing(false);
         performSigmaStack(frameBuffer, width, height);
+        return;
+      }
+      if (!location) {
+        showToast('GPS lock lost — capture stopped.', 'error');
+        setIsCapturing(false);
         return;
       }
 
@@ -417,7 +532,7 @@ export default function App() {
       const exposureStart = performance.now();
       while (performance.now() - exposureStart < exposureTime) {
         gyroSamples.push({ alpha: orientationRef.current.alpha, beta: orientationRef.current.beta, gamma: orientationRef.current.gamma, timestamp: Date.now() });
-        accelSamples.push({ x: 0, y: 0, z: 1, timestamp: Date.now() });
+        accelSamples.push({ ...accelRef.current });
         await new Promise(r => setTimeout(r, 50));
       }
       
@@ -449,32 +564,17 @@ export default function App() {
       setLivePreviewUrl(canvas.toDataURL('image/jpeg', 0.5));
 
       const currentFrame = ctx.getImageData(0, 0, width, height);
-      
-      // Meteor pulse check on full frame
-      let maxBright = 0;
-      for (let i = 0; i < width * height; i++) {
-        const brightness = (currentFrame.data[i * 4] + currentFrame.data[i * 4 + 1] + currentFrame.data[i * 4 + 2]) / 3;
-        if (brightness > maxBright) maxBright = brightness;
-      }
-      if (maxBright > 240) {
-        const now = Date.now();
-        if (now - lastMeteorTime > 5000) {
-           setLastMeteorTime(now);
-           showToast("☄ METEOR DETECTED!", "info");
-           vibrate(ImpactStyle.Heavy);
-        }
-      }
 
       // --- GUIDED ALIGNMENT (Stellarium Priors) ---
       let dx = 0, dy = 0, rotation = 0;
-      
+
       // Calculate where stars *should* be right now
       const { fovX, fovY } = OcularsEngine.getPhoneCameraFOV();
       const phoneAz = orientation.alpha;
       const phoneAlt = orientation.beta > 0 ? 90 - orientation.beta : -90 - orientation.beta;
-      
+
       const predictedPositions = STAR_CATALOG.map(s => {
-          const { alt, az } = CelestialEngine.toHorizontal({ ra: s.ra, dec: s.dec }, location!.lat, location!.lng, new Date());
+          const { alt, az } = CelestialEngine.toHorizontal({ ra: s.ra, dec: s.dec }, location.lat, location.lng, new Date());
           let azDiff = az - phoneAz; while (azDiff > 180) azDiff -= 360; while (azDiff < -180) azDiff += 360;
           let altDiff = alt - phoneAlt;
           if (Math.abs(azDiff) < fovX && Math.abs(altDiff) < fovY) {
@@ -486,6 +586,19 @@ export default function App() {
           }
           return null;
       }).filter(p => p !== null) as {x:number,y:number,mag:number}[];
+
+      // Meteor pulse check: require a spatially-coherent, ELONGATED bright streak that
+      // doesn't sit on top of a known catalog star (stars are point-like; meteors leave trails).
+      const meteorStreak = detectMeteorStreak(currentFrame.data, width, height, predictedPositions, previousFrameDataRef.current);
+      if (meteorStreak) {
+        const now = Date.now();
+        if (now - lastMeteorTime > 5000) {
+           setLastMeteorTime(now);
+           showToast("☄ METEOR DETECTED!", "info");
+           vibrate(ImpactStyle.Heavy);
+        }
+      }
+      previousFrameDataRef.current = currentFrame.data;
 
       // Detect peaks around predicted regions
       const currentStars: {x:number, y:number}[] = [];
@@ -525,16 +638,20 @@ export default function App() {
       // Earth rotates west-to-east, stars appear to move east-to-west (positive X drift)
       dx += driftPixels;
 
-      if (dx !== 0 || dy !== 0 || rotation !== 0) {
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = width; tempCanvas.height = height;
-        const tCtx = tempCanvas.getContext('2d')!;
-        
+      const tCtx = (dx !== 0 || dy !== 0 || rotation !== 0)
+        ? (() => {
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = width; tempCanvas.height = height;
+            return tempCanvas.getContext('2d');
+          })()
+        : null;
+
+      if (tCtx) {
         // Subpixel alignment & Apply to frame
         tCtx.translate(width/2 + dx, height/2 + dy);
         tCtx.rotate(rotation);
         tCtx.translate(-width/2, -height/2);
-        
+
         tCtx.drawImage(video, 0, 0, width, height);
         frameBuffer.push(new Uint8ClampedArray(tCtx.getImageData(0, 0, width, height).data));
       } else {
@@ -551,8 +668,14 @@ export default function App() {
   const performSigmaStack = async (frames: Uint8ClampedArray[], width: number, height: number) => {
     setIsProcessing(true);
     setProgress(0);
-    const stackCanvas = stackCanvasRef.current!;
-    const stackCtx = stackCanvas.getContext('2d')!;
+    const stackCanvas = stackCanvasRef.current;
+    const stackCtx = stackCanvas?.getContext('2d');
+    if (!stackCanvas || !stackCtx) {
+      showToast('Stacking surface unavailable. Please retry the session.', 'error');
+      setIsProcessing(false);
+      return;
+    }
+    try {
     const resultData = stackCtx.createImageData(width, height);
     const numFrames = frames.length;
     const pixelCount = width * height * 4;
@@ -596,10 +719,37 @@ export default function App() {
     const finalImage = stackCanvas.toDataURL('image/jpeg', 0.95);
     setStackedImage(finalImage);
     setIsProcessing(false);
-    analyzeImage(finalImage);
+
+    // Offline geometric plate-solve: real star extraction + triangle-ratio constellation
+    // matching + RA/Dec-projected DSO proximity check (no network, no AI hallucination risk).
+    // Used to ground the AI analysis prompt with verified detections.
+    let offlineContext: string[] = [];
+    if (location) {
+      try {
+        const stars = PlateSolver.extractStars(stackCtx, width, height);
+        const detectedConstellations = PlateSolver.findConstellations(stars, phoneFov.fovDiagonal);
+        const phoneAltForDSO = orientation.beta > 0 ? 90 - orientation.beta : -90 - orientation.beta;
+        const detectedDSOs = PlateSolver.findDSOs(stars, {
+          lat: location.lat, lng: location.lng, date: new Date(),
+          phoneAz: orientation.alpha, phoneAlt: phoneAltForDSO,
+          fovX: phoneFov.fovX, fovY: phoneFov.fovY, width, height,
+        });
+        if (detectedConstellations.length) offlineContext.push(`Offline-verified constellations in frame: ${detectedConstellations.join(', ')}`);
+        if (detectedDSOs.length) offlineContext.push(`Offline-verified deep-sky objects in frame: ${detectedDSOs.join(', ')}`);
+      } catch (err) {
+        console.warn('Offline plate-solve skipped', err);
+      }
+    }
+
+    analyzeImage(finalImage, offlineContext);
+    } catch (err) {
+      console.error('Stacking failed', err);
+      showToast('Image stacking failed. Try a smaller burst count.', 'error');
+      setIsProcessing(false);
+    }
   };
 
-  const analyzeImage = async (base64: string) => {
+  const analyzeImage = async (base64: string, offlineContext: string[] = []) => {
     setIsAnalyzing(true);
     try {
       // PRO MODE: Hardware Meta Payload for Deep Spectrum Verification
@@ -611,14 +761,16 @@ export default function App() {
         whiteBalance,
         bortle: skyConditions?.bortle || 4
       };
-      
+
       const payloadString = JSON.stringify(metaPayload);
-      const result = await identifyCelestialObjects(base64, location || { lat: 0, lng: 0 }, orientation, [payloadString, ...identifiedConstsRef.current]);
+      const result = await identifyCelestialObjects(base64, location || { lat: 0, lng: 0 }, orientation, [payloadString, ...offlineContext, ...identifiedConstsRef.current]);
       setAnalysis(result);
       if (isAutoSave && location) {
         await addToGallery({ id: Date.now().toString(), image: base64, analysis: result, timestamp: Date.now(), location });
       }
       showToast("Deep Spectrum Analysis Complete!", "success");
+      // Natural break point — session is fully done, nothing mid-capture to interrupt.
+      maybeShowInterstitial();
     } catch (err) {
       showToast("AI Analysis failed.", "error");
     } finally {
@@ -655,7 +807,7 @@ export default function App() {
           <div className="space-y-3 text-left mb-8">
             {[
               { icon: <Camera className="w-4 h-4" />, text: 'HDR stacking with sigma-clip, median & star trails' },
-              { icon: <Sparkles className="w-4 h-4" />, text: 'Gemini AI identifies stars, nebulae & galaxies' },
+              { icon: <Sparkles className="w-4 h-4" />, text: 'AI identifies stars, nebulae & galaxies' },
               { icon: <Telescope className="w-4 h-4" />, text: 'Stellarium meteor shower & observability engine' },
               { icon: <Eye className="w-4 h-4" />, text: 'Real-time Bortle scale, moon phase & sky quality' },
             ].map((item, i) => (
@@ -668,7 +820,9 @@ export default function App() {
           <motion.button whileTap={{ scale: 0.96 }} onClick={async () => { await requestPermission(); setShowIntro(false); }} className="w-full py-4 bg-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2">
             <Zap className="w-5 h-5" /> INITIALIZE SENSORS
           </motion.button>
-          <p className="mt-6 text-[7px] text-gray-600 uppercase tracking-[0.3em]">v14.0 • Stellarium Remix • Gemini AI</p>
+          <p className="mt-4 text-[8px] text-gray-500 leading-relaxed">Free with ads. Remove ads anytime with a one-time ₹199 purchase in Settings.</p>
+          <p className="mt-3 text-[7px] text-gray-600 uppercase tracking-[0.3em]">v14.0 • Stellarium Remix • AI-Powered</p>
+          <a href="/privacy.html" target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-[8px] text-emerald-500/70 underline">Privacy Policy</a>
         </motion.div>
       </div>
     );
@@ -859,6 +1013,27 @@ export default function App() {
               ))}
             </div>
           </div>
+          <div className="glass-panel p-4 rounded-2xl">
+            <p className="text-[9px] text-emerald-500 font-black uppercase tracking-widest mb-2">Ad-Free</p>
+            {isAdFree ? (
+              <p className="text-xs text-emerald-400 font-bold flex items-center gap-2"><CheckCircle2 className="w-4 h-4" /> Ad-free unlocked. Thank you!</p>
+            ) : (
+              <>
+                <p className="text-[8px] text-gray-500 mb-3">Remove all ads permanently with a one-time payment. No subscription.</p>
+                <button
+                  disabled={isPurchasing}
+                  onClick={async () => {
+                    const result = await purchase();
+                    if (result.success) showToast('Ad-free unlocked! Enjoy the app without interruptions.', 'success');
+                    else if (result.error && result.error !== 'Payment cancelled.') showToast(result.error, 'error');
+                  }}
+                  className="w-full py-2.5 rounded-xl text-[10px] font-black uppercase bg-emerald-600 text-white disabled:opacity-50"
+                >
+                  {isPurchasing ? 'Processing…' : 'Go Ad-Free — ₹199 (one-time)'}
+                </button>
+              </>
+            )}
+          </div>
           <div className="glass-panel p-4 rounded-2xl"><p className="text-[9px] text-amber-500 font-black uppercase tracking-widest mb-3">Calibration Frames</p>
             <p className="text-[8px] text-gray-500 mb-3">Capture reference frames for professional calibration (Dark, Flat, Bias).</p>
             <div className="grid grid-cols-3 gap-2">
@@ -871,6 +1046,14 @@ export default function App() {
           <div className="h-20" />
         </div>
       )}
+      {/* ===== SKY MAP TAB ===== */}
+      {viewMode === 'sky' && (
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 pt-14 safe-p-top flex flex-col items-center bg-[#05070a]">
+          <h2 className="text-base font-black text-white uppercase tracking-widest self-start mb-3">Interactive Sky Map</h2>
+          <SkyMap orientation={orientation} location={location} analysis={analysis} />
+          <p className="text-[9px] text-gray-500 mt-4 text-center px-6">Pinch to zoom, drag to pan. Objects shown are plotted at their real computed sky coordinates from your last analysis.</p>
+        </div>
+      )}
       {/* ===== GALLERY TAB ===== */}
       <AnimatePresence>{viewMode === 'gallery' && <Gallery items={gallery} onDelete={deleteFromGallery} onClose={() => setViewMode('camera')} />}</AnimatePresence>
       {/* ===== BOTTOM NAV ===== */}
@@ -879,6 +1062,7 @@ export default function App() {
           {([
             { mode: 'camera' as ViewMode, icon: <Camera className="w-5 h-5" />, label: 'Capture' },
             { mode: 'map' as ViewMode, icon: <Gauge className="w-5 h-5" />, label: 'Dashboard' },
+            { mode: 'sky' as ViewMode, icon: <MapIcon className="w-5 h-5" />, label: 'Sky Map' },
             { mode: 'gallery' as ViewMode, icon: <History className="w-5 h-5" />, label: 'Gallery' },
           ]).map(tab => (
             <button key={tab.mode} onClick={() => setViewMode(tab.mode)} className={`flex flex-col items-center gap-0.5 px-5 py-1.5 rounded-xl transition-all ${viewMode === tab.mode ? 'text-emerald-500 bg-emerald-500/10' : 'text-gray-600'}`}>

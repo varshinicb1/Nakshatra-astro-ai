@@ -24,7 +24,8 @@
       ]
     },
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "types": ["node", "express", "cors"]
   },
-  "include": ["src", "server"]
+  "include": ["src", "server", "api"]
 }

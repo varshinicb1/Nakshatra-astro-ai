@@ -1,23 +1,33 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import * as d3 from 'd3';
 import { motion, AnimatePresence } from 'motion/react';
-import { CelestialEngine } from '../utils/celestialEngine';
-
-interface SkyObject {
-  name: string;
-  type: string;
-  magnitude: string;
-  ra?: number; // Right Ascension in degrees
-  dec?: number; // Declination in degrees
-}
+import { CelestialEngine, STAR_CATALOG } from '../utils/celestialEngine';
 
 interface SkyMapProps {
   orientation: { alpha: number; beta: number; gamma: number };
   location: { lat: number; lng: number } | null;
   analysis: {
     constellations: string[];
-    objects: Array<{ name: string; type: string; magnitude: string }>;
+    objects: Array<{ name: string; type: string; magnitude: string; ra?: string; dec?: string }>;
   } | null;
+}
+
+/**
+ * Parses AI-returned RA ("HH:MM:SS") / Dec ("+DD:MM:SS") strings into decimal degrees.
+ * Returns null if the string is missing or malformed — callers should skip plotting
+ * rather than falling back to a random/guessed position.
+ */
+function parseRaDecToDegrees(ra?: string, dec?: string): { raDeg: number; decDeg: number } | null {
+  if (!ra || !dec) return null;
+  const raParts = ra.split(':').map(Number);
+  const decParts = dec.split(':').map(Number);
+  if (raParts.length < 2 || decParts.length < 2 || raParts.some(isNaN) || decParts.some(isNaN)) return null;
+
+  const raHours = raParts[0] + (raParts[1] || 0) / 60 + (raParts[2] || 0) / 3600;
+  const decSign = dec.trim().startsWith('-') ? -1 : 1;
+  const decDeg = decSign * (Math.abs(decParts[0]) + (decParts[1] || 0) / 60 + (decParts[2] || 0) / 3600);
+
+  return { raDeg: raHours * 15, decDeg };
 }
 
 // Major Stars Data
@@ -81,15 +91,14 @@ interface Constellation {
   lines: number[][];
 }
 
-// Simulated star field
-const generateStars = (count: number): Star[] => {
-  return Array.from({ length: count }, (_, i) => ({
-    id: i,
-    ra: Math.random() * 360,
-    dec: Math.random() * 180 - 90,
-    mag: Math.random() * 5 + 1
-  }));
-};
+// Real background star field, sourced from the same STAR_CATALOG used for capture-time
+// guided alignment elsewhere in the app (converts RA from hours to degrees for this projection).
+const CATALOG_STARS: Star[] = STAR_CATALOG.map((s, i) => ({
+  id: i,
+  ra: s.ra * 15,
+  dec: s.dec,
+  mag: s.mag,
+}));
 export const SkyMap: React.FC<SkyMapProps> = ({ orientation, location, analysis }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredObject, setHoveredObject] = useState<any>(null);
@@ -117,7 +126,7 @@ export const SkyMap: React.FC<SkyMapProps> = ({ orientation, location, analysis 
   const sunPos = useMemo(() => CelestialEngine.getSunPosition(currentTime), [currentTime]);
   const sunHorizontal = useMemo(() => location ? mapToHorizontal(sunPos.ra * 15, sunPos.dec) : null, [sunPos, location]);
 
-  const stars = useMemo(() => generateStars(400), []);
+  const stars = CATALOG_STARS;
 
   // Projection: Orthographic or Stereographic for sky view
   const projection = useMemo(() => {
@@ -130,15 +139,18 @@ export const SkyMap: React.FC<SkyMapProps> = ({ orientation, location, analysis 
 
   const pathGenerator = d3.geoPath().projection(projection);
 
-  // Map analysis objects to simulated coordinates
+  // Map AI-identified objects to their real RA/Dec (parsed from the analysis result).
+  // Objects whose coordinates couldn't be parsed are omitted rather than guessed.
   const identifiedObjects = useMemo(() => {
     if (!analysis) return [];
-    return analysis.objects.map((obj) => ({
-      ...obj,
-      ra: (orientation.alpha + (Math.random() - 0.5) * 20) % 360,
-      dec: (orientation.beta + (Math.random() - 0.5) * 20) % 90
-    }));
-  }, [analysis, orientation.alpha, orientation.beta]);
+    return analysis.objects
+      .map((obj) => {
+        const coords = parseRaDecToDegrees(obj.ra, obj.dec);
+        if (!coords) return null;
+        return { ...obj, ra: coords.raDeg, dec: coords.decDeg };
+      })
+      .filter((o): o is NonNullable<typeof o> => o !== null);
+  }, [analysis]);
 
   // Generate grid lines
   const graticule = useMemo(() => {

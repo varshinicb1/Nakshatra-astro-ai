@@ -18,10 +18,15 @@ android {
     }
     signingConfigs {
         release {
-            storeFile file('../nakshatra-release.keystore')
-            storePassword 'nakshatra123'
-            keyAlias 'nakshatra'
-            keyPassword 'nakshatra123'
+            def keystorePropsFile = rootProject.file('keystore.properties')
+            def keystoreProps = new Properties()
+            if (keystorePropsFile.exists()) {
+                keystoreProps.load(new FileInputStream(keystorePropsFile))
+            }
+            storeFile file(keystoreProps.getProperty('storeFile', System.getenv('ANDROID_KEYSTORE_PATH') ?: '../nakshatra-release.keystore'))
+            storePassword keystoreProps.getProperty('storePassword', System.getenv('ANDROID_KEYSTORE_PASSWORD'))
+            keyAlias keystoreProps.getProperty('keyAlias', System.getenv('ANDROID_KEY_ALIAS') ?: 'nakshatra')
+            keyPassword keystoreProps.getProperty('keyPassword', System.getenv('ANDROID_KEY_PASSWORD'))
         }
     }
     buildTypes {

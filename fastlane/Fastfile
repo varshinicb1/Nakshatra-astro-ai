@@ -1,0 +1,50 @@
+default_platform(:android)
+
+# ---- Build the publishable artifact (AAB) ----
+# Runs: vite build -> cap sync -> gradlew bundleRelease
+lane :build do
+  sh("npm run build")
+  sh("npx cap sync android")
+  Dir.chdir("../android") do
+    sh("cmd /c gradlew.bat bundleRelease")
+  end
+  aab = File.expand_path("../android/app/build/outputs/bundle/release/app-release.aab")
+  UI.success("AAB built at: #{aab}")
+  aab
+end
+
+# ---- Upload to CLOSED testing track (required before production access) ----
+# In Play Console you must first create a Closed track and add >=12 tester emails.
+# Then run:  fastlane closed_test
+lane :closed_test do
+  aab = lane_context[SharedValues::LANE_NAME] ? nil : nil
+  aab_path = File.expand_path("../android/app/build/outputs/bundle/release/app-release.aab")
+  unless File.exist?(aab_path)
+    aab_path = build
+  end
+  supply(
+    aab: aab_path,
+    track: "alpha",            # 'alpha' = closed testing track in Play Console
+    # release_status: 'draft',  # uncomment to keep as draft
+    skip_upload_metadata: true,
+    skip_upload_images: true,
+    skip_upload_screenshots: true,
+  )
+  UI.success("Uploaded AAB to CLOSED (alpha) track.")
+end
+
+# ---- Upload to PRODUCTION (only after Google grants production access) ----
+lane :production do
+  aab_path = File.expand_path("../android/app/build/outputs/bundle/release/app-release.aab")
+  unless File.exist?(aab_path)
+    aab_path = build
+  end
+  supply(
+    aab: aab_path,
+    track: "production",
+    skip_upload_metadata: true,
+    skip_upload_images: true,
+    skip_upload_screenshots: true,
+  )
+  UI.success("Uploaded AAB to PRODUCTION track.")
+end

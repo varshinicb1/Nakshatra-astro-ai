@@ -13,9 +13,14 @@
     "server:dev": "tsx watch server/index.ts",
     "android:sync": "npx cap sync android",
     "android:open": "npx cap open android",
-    "android:run": "npx cap run android"
+    "android:run": "npx cap run android",
+    "android:aab": "npm run build && npx cap sync android && cd android && gradlew.bat bundleRelease",
+    "play:upload": "node scripts/play-upload.mjs",
+    "play:internal": "node scripts/play-upload.mjs internal",
+    "play:production": "node scripts/play-upload.mjs production"
   },
   "dependencies": {
+    "@capacitor-community/admob": "^8.0.0",
     "@capacitor/android": "^7.0.0",
     "@capacitor/camera": "^7.0.0",
     "@capacitor/cli": "^7.0.0",
@@ -26,10 +31,10 @@
     "@capacitor/share": "^7.0.0",
     "@capacitor/splash-screen": "^7.0.0",
     "@capacitor/status-bar": "^7.0.0",
-    "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@types/d3": "^7.4.3",
     "@vitejs/plugin-react": "^5.0.4",
+    "cordova-plugin-purchase": "^13.17.2",
     "cors": "^2.8.5",
     "d3": "^7.9.0",
     "dotenv": "^17.2.3",
